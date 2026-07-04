@@ -35,6 +35,13 @@ except ImportError:
 # 楽天アプリID。環境変数 RAKUTEN_APP_ID があればそれを使う（クラウド用）。
 RAKUTEN_APP_ID = os.environ.get("RAKUTEN_APP_ID") or "ここに楽天のアプリIDを貼る"
 
+# 楽天アクセスキー。2026年のAPI刷新でapplicationIdに加えて必須になった。
+# 環境変数 RAKUTEN_ACCESS_KEY があればそれを使う（クラウド用）。
+RAKUTEN_ACCESS_KEY = os.environ.get("RAKUTEN_ACCESS_KEY") or "ここに楽天のアクセスキーを貼る"
+
+# 楽天アプリ登録時に設定した「アプリケーションURL」。Origin/Refererヘッダーとして送る。
+RAKUTEN_APP_URL = os.environ.get("RAKUTEN_APP_URL") or "https://github.com/kouheibass0608-png/disney-hotel-watch"
+
 # ntfyの自分専用トピック名。環境変数 NTFY_TOPIC があればそれを使う（クラウド用）。
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC") or "disney-hotel-watch-CHANGE-ME-x7k2"
 
@@ -71,7 +78,7 @@ WATCHES = [
 # =================================
 
 
-API_URL = "https://app.rakuten.co.jp/services/api/Travel/VacantHotelSearch/20170426"
+API_URL = "https://openapi.rakuten.co.jp/engine/api/Travel/VacantHotelSearch/20170426"
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state.json")
 
 
@@ -125,14 +132,19 @@ def check_watch(watch):
     """
     params = {
         "applicationId": RAKUTEN_APP_ID,
+        "accessKey": RAKUTEN_ACCESS_KEY,
         "format": "json",
         "checkinDate": watch["checkin"],
         "checkoutDate": watch["checkout"],
         "hotelNo": watch["hotelNo"],
         "adultNum": watch.get("adultNum", 2),
     }
+    headers = {
+        "Origin": RAKUTEN_APP_URL,
+        "Referer": RAKUTEN_APP_URL,
+    }
     try:
-        resp = requests.get(API_URL, params=params, timeout=20)
+        resp = requests.get(API_URL, params=params, headers=headers, timeout=20)
     except Exception as e:
         print(f"  ⚠ 通信エラー: {e}")
         return None, None, None
@@ -231,6 +243,9 @@ def main():
     # --- 設定チェック ---
     if "貼る" in RAKUTEN_APP_ID or not RAKUTEN_APP_ID.strip():
         print("⚠ RAKUTEN_APP_ID が未設定です。設定欄に入れるか、環境変数で渡してください。")
+        sys.exit(1)
+    if "貼る" in RAKUTEN_ACCESS_KEY or not RAKUTEN_ACCESS_KEY.strip():
+        print("⚠ RAKUTEN_ACCESS_KEY が未設定です。設定欄に入れるか、環境変数で渡してください。")
         sys.exit(1)
     if "CHANGE-ME" in NTFY_TOPIC:
         print("⚠ NTFY_TOPIC を自分専用の文字列に変えてください（推測されにくいものに）。")
