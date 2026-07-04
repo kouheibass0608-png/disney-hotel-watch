@@ -1,0 +1,42 @@
+# このファイルはリポジトリ内の  .github/workflows/watch.yml  に置きます。
+name: Disney Hotel Watch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # 5分ごとに実行（UTC基準。GitHub側の都合で多少遅延します）
+  workflow_dispatch: {}       # 「Run workflow」ボタンで手動実行できるようにする
+
+permissions:
+  contents: write             # 空室状況の記録ファイルをリポジトリに保存するため
+
+concurrency:
+  group: disney-hotel-watch   # 実行が重ならないようにする
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: コードを取得
+        uses: actions/checkout@v4
+
+      - name: Pythonを準備
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: requestsをインストール
+        run: pip install requests
+
+      - name: 空室をチェック（1回）
+        env:
+          RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python disney_hotel_watch.py --once
+
+      - name: 状態が変わっていれば記録を保存
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add watch_state.json || true
+          git diff --staged --quiet || (git commit -m "update watch state [skip ci]" && git push)
