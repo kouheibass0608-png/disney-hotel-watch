@@ -42,7 +42,7 @@ RAKUTEN_ACCESS_KEY = os.environ.get("RAKUTEN_ACCESS_KEY") or "ここに楽天の
 # APIに送るReferer/Origin。楽天アプリ設定の「許可されたWebサイト」に載っている
 # ドメインでないと HTTP_REFERRER_NOT_ALLOWED で弾かれる。github.com等は登録できない
 # （楽天系ドメインしか受け付けない）ため、既定で許可済みの楽天ドメインを送る。
-RAKUTEN_APP_URL = os.environ.get("RAKUTEN_APP_URL") or "https://webservice.rakuten.co.jp/"
+RAKUTEN_APP_URL = os.environ.get("RAKUTEN_APP_URL") or "https://www.rakuten.co.jp/"
 
 # ntfyの自分専用トピック名。環境変数 NTFY_TOPIC があればそれを使う（クラウド用）。
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC") or "disney-hotel-watch-CHANGE-ME-x7k2"
