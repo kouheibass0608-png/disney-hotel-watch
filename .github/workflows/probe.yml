@@ -1,0 +1,23 @@
+# 公式サイト調査用の一時ワークフロー。手動実行のみ。
+name: Probe TDR Official Site
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: コードを取得
+        uses: actions/checkout@v4
+
+      - name: Pythonを準備
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: requestsをインストール
+        run: pip install requests
+
+      - name: 公式サイトの応答を調査
+        run: python probe_tdr.py
