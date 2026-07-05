@@ -535,6 +535,19 @@ def send_ntfy(title, message, click_url=None, priority=3, tags=None):
         print(f"  ⚠ 通知の送信に失敗: {e}")
 
 
+_debug_dump_count = 0
+
+
+def _debug_dump(resp, reason, limit=3):
+    """API調査用の一時ログ。最初のlimit回だけステータスと本文先頭を出力する。"""
+    global _debug_dump_count
+    if _debug_dump_count >= limit:
+        return
+    _debug_dump_count += 1
+    print(f"  🔍 DEBUG[{_debug_dump_count}] {reason} / HTTP {resp.status_code}")
+    print(f"  🔍 DEBUG[{_debug_dump_count}] body先頭400字: {resp.text[:400]}")
+
+
 def check_watch(watch):
     """
     1件分の空室をチェックする。
@@ -572,15 +585,18 @@ def check_watch(watch):
         err_desc = body.get("error_description", "")
         if err in ("wrong_parameter", "not_authorized", "application_not_found"):
             print(f"  ⚠ 設定エラーかも（{err}: {err_desc}）→ アプリIDや hotelNo を確認してください")
+        _debug_dump(resp, "非200レスポンス")
         return False, None, None
 
     try:
         data = resp.json()
     except Exception:
+        _debug_dump(resp, "JSONパース失敗")
         return False, None, None
 
     hotels = data.get("hotels")
     if not hotels:
+        _debug_dump(resp, f"200だがhotelsなし（トップレベルキー: {list(data.keys())}）")
         return False, None, None  # 空きなし
 
     # ここまで来たら空きあり。部屋情報を取り出す。
