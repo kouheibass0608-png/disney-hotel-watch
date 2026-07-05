@@ -1,10 +1,10 @@
 # このファイルはリポジトリ内の  .github/workflows/watch.yml  に置きます。
 name: Disney Hotel Watch
 
+# 楽天API・公式サイトともにGitHub ActionsのIPからはブロックされるため、
+# 定期実行は停止中。監視はPCローカル版（disney_hotel_watch_official.py）で行う。
 on:
-  schedule:
-    - cron: "*/5 * * * *"    # 5分ごとに実行（UTC基準。GitHub側の都合で多少遅延します）
-  workflow_dispatch: {}       # 「Run workflow」ボタンで手動実行できるようにする
+  workflow_dispatch: {}       # 「Run workflow」ボタンで手動実行のみ可能
 
 permissions:
   contents: write             # 空室状況の記録ファイルをリポジトリに保存するため
