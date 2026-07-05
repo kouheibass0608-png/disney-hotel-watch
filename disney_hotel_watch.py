@@ -576,17 +576,29 @@ def check_watch(watch):
         return None, None, None
 
     if resp.status_code != 200:
-        # 設定ミス系のエラーだけ知らせる。not_found 等は「空きなし」として扱う。
+        # 「空きなし」を意味する not_found だけを空きなし扱いにし、
+        # それ以外のエラーは警告を出してスキップ（状態を変えない）。
         try:
             body = resp.json()
         except Exception:
             body = {}
         err = body.get("error", "")
         err_desc = body.get("error_description", "")
-        if err in ("wrong_parameter", "not_authorized", "application_not_found"):
+        # 2026年新APIのエラー形式 {"errors": {"errorCode":..., "errorMessage":...}} にも対応
+        new_err = body.get("errors") if isinstance(body.get("errors"), dict) else {}
+        err_msg = new_err.get("errorMessage", "")
+
+        if resp.status_code == 404 and (err == "not_found" or "NOT_FOUND" in err_msg.upper()):
+            return False, None, None  # 空きなし
+
+        if err_msg == "HTTP_REFERRER_NOT_ALLOWED":
+            print("  ⚠ Refererが楽天に拒否されました。楽天アプリ設定の「許可されたWebサイト」に"
+                  f"呼び出し元URL（{RAKUTEN_APP_URL}）を登録してください")
+        elif err in ("wrong_parameter", "not_authorized", "application_not_found"):
             print(f"  ⚠ 設定エラーかも（{err}: {err_desc}）→ アプリIDや hotelNo を確認してください")
-        _debug_dump(resp, "非200レスポンス")
-        return False, None, None
+        else:
+            print(f"  ⚠ APIエラー（HTTP {resp.status_code}: {err or err_msg or resp.text[:120]}）")
+        return None, None, None  # エラーはスキップ（空きなしとは区別する）
 
     try:
         data = resp.json()
