@@ -16,8 +16,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: requestsをインストール
-        run: pip install requests
+      # requests直叩きは調査済み（全てタイムアウト＝ブロック）。ブラウザ版のみ実行する。
+      - name: Playwrightをインストール
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
 
-      - name: 公式サイトの応答を調査
-        run: python probe_tdr.py
+      - name: 公式サイトの応答を調査（ブラウザ版）
+        run: python probe_tdr_browser.py
