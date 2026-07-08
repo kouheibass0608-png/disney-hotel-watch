@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ディズニーホテル 空室通知（公式サイト版）/ PCローカル実行専用
-==============================================================
-東京ディズニーリゾート公式予約サイト（reserve.tokyodisneyresort.jp）から
-空き情報を取得し、空室が出たら ntfy でスマホに通知します。
+ディズニーホテル 空室通知（公式サイト版・ブラウザ方式）/ PCローカル実行専用
+============================================================================
+東京ディズニーリゾート公式予約サイト（reserve.tokyodisneyresort.jp）を
+本物のブラウザエンジン（Playwright/Chromium）で開いて空き情報を取得し、
+空室が出たら ntfy でスマホに通知します。
 
-※ 公式サイトはクラウド（GitHub Actionsなど）のIPをブロックするため、
-   このスクリプトは自宅のPCで動かす前提です。
+※ 公式サイトはPythonからの直接アクセス（requests）を家庭用回線でも
+   ブロックするため、本物のブラウザを使う方式にしています。
+※ クラウド（GitHub Actions等）のIPもブロックされるため、自宅PCで動かします。
+
+準備（最初に一度だけ）:
+        ~/disney-venv/bin/pip install playwright requests
+        ~/disney-venv/bin/python3 -m playwright install chromium
 
 使い方（2ステップ）:
   ステップ1) まず「調査モード」で公式サイトの応答を確認します:
-        python3 disney_hotel_watch_official.py --probe
+        ~/disney-venv/bin/python3 disney_hotel_watch_official.py --probe
      → 画面に出た内容（probe_result.txt にも保存されます）を
         開発者に貼ってください。空室判定ロジックを確定します。
+     ※ うまくいかない時は --probe --show を付けると実際のブラウザ画面が
+        表示されるので、何が起きているか目で確認できます。
 
   ステップ2) 通常実行（監視ループ・スリープ防止つき）:
-        python3 disney_hotel_watch_official.py
+        ~/disney-venv/bin/python3 disney_hotel_watch_official.py
 
 スリープ防止:
   実行中は自動でPCのスリープを防ぎます（Windows / Mac 対応）。
@@ -32,12 +40,21 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from urllib.parse import urlencode
 
 try:
-    import requests
+    import requests  # ntfy通知の送信に使用
 except ImportError:
     print("requests が見つかりません。ターミナルで次を実行してください：")
-    print("    pip3 install requests")
+    print("    ~/disney-venv/bin/pip install requests")
+    sys.exit(1)
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    print("playwright が見つかりません。ターミナルで次の2つを実行してください：")
+    print("    ~/disney-venv/bin/pip install playwright")
+    print("    ~/disney-venv/bin/python3 -m playwright install chromium")
     sys.exit(1)
 
 
@@ -84,17 +101,11 @@ WATCHES = [
 
 BASE = "https://reserve.tokyodisneyresort.jp"
 LIST_URL = BASE + "/hotel/list/"
-STOCK_API_URL = BASE + "/hotel/api/queryHotelPriceStock/"
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state_official.json")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-
-session = requests.Session()
-session.headers.update({
-    "User-Agent": UA,
-    "Accept-Language": "ja,en;q=0.8",
-})
+# --show を付けるとブラウザ画面を表示しながら動く（動作確認用）
+HEADLESS = "--show" not in sys.argv
 
 
 def now():
@@ -175,10 +186,9 @@ def prevent_sleep():
     return lambda: None
 
 
-# ---------- 公式サイトへのアクセス ----------
+# ---------- ブラウザで公式サイトを開く ----------
 
-def fetch_hotel_list(watch):
-    """ホテル一覧ページ（HTML）を取得する。"""
+def build_list_url(watch):
     params = {
         "useDate": watch["useDate"],
         "stayingDays": str(watch.get("stayingDays", 1)),
@@ -188,10 +198,49 @@ def fetch_hotel_list(watch):
         "searchHotelCD": watch.get("hotelCD", ""),
         "displayType": "hotel-search",
     }
-    return session.get(LIST_URL, params=params, timeout=30)
+    return LIST_URL + "?" + urlencode(params)
 
 
-def check_watch(watch):
+def new_context(p):
+    browser = p.chromium.launch(headless=HEADLESS)
+    context = browser.new_context(
+        locale="ja-JP",
+        timezone_id="Asia/Tokyo",
+        viewport={"width": 1280, "height": 900},
+    )
+    return browser, context
+
+
+def fetch_page(context, watch, wait_ms=15000):
+    """
+    公式サイトの検索結果ページをブラウザで開く。
+    戻り値: (title, html, api_responses)
+      api_responses: [(url, status, body先頭2000字), ...]  /hotel/api/ のXHRのみ
+    """
+    page = context.new_page()
+    captured = []
+
+    def on_response(resp):
+        if "/hotel/api/" in resp.url:
+            try:
+                body = resp.text()[:2000]
+            except Exception:
+                body = "(body取得失敗)"
+            captured.append((resp.url, resp.status, body))
+
+    page.on("response", on_response)
+    try:
+        page.goto(build_list_url(watch), timeout=60000,
+                  wait_until="domcontentloaded")
+        page.wait_for_timeout(wait_ms)  # XHRや描画を待つ
+        title = page.title()
+        html = page.content()
+    finally:
+        page.close()
+    return title, html, captured
+
+
+def check_watch(context, watch):
     """
     1件分の空室をチェックする。
     戻り値: (available, detail_text, url)
@@ -200,36 +249,30 @@ def check_watch(watch):
        それまでは暫定判定（判定不能時はHTMLを保存して知らせる）です。
     """
     try:
-        resp = fetch_hotel_list(watch)
+        title, html, api_responses = fetch_page(context, watch)
     except Exception as e:
-        print(f"  ⚠ 通信エラー: {e}")
+        print(f"  ⚠ ページ取得エラー: {e}")
         return None, None, None
 
-    if resp.status_code != 200:
-        print(f"  ⚠ HTTP {resp.status_code} が返りました（ブロックの可能性）")
-        return None, None, None
-
-    html = resp.text
+    text = html
 
     # --- 暫定の空室判定（probe結果で更新予定） ---
-    # 満室・空きなしを示す典型的な文言
-    no_vacancy_markers = ["満室", "空室はありません", "該当するプランがありません", "ご希望の条件では見つかりません"]
+    no_vacancy_markers = ["満室", "空室はありません", "該当するプランがありません",
+                          "ご希望の条件では見つかりません"]
     for marker in no_vacancy_markers:
-        if marker in html:
+        if marker in text:
             return False, None, None
 
-    # 部屋詳細・予約リンクらしきものがあれば空きありとみなす
-    if re.search(r"/hotel/(detail|room|plan)/", html) or "予約する" in html:
-        page_url = resp.url
-        return True, "空室の可能性があります（公式サイトで確認してください）", page_url
+    if re.search(r"/hotel/(detail|room|plan)/", text) or "予約する" in text:
+        return True, "空室の可能性があります（公式サイトで確認してください）", build_list_url(watch)
 
     # 判定できない → HTMLを保存して知らせる
-    dump_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "last_unknown_page.html")
+    dump_path = os.path.join(SCRIPT_DIR, "last_unknown_page.html")
     try:
         with open(dump_path, "w", encoding="utf-8") as f:
             f.write(html)
-        print(f"  ❓ 空室判定できないページでした。{dump_path} を開発者に共有してください")
+        print(f"  ❓ 空室判定できないページでした（タイトル: {title}）。"
+              f"{dump_path} を開発者に共有してください")
     except Exception:
         pass
     return None, None, None
@@ -246,57 +289,52 @@ def run_probe():
         lines.append(str(text))
 
     out("=" * 60)
-    out(" 公式サイト調査モード（--probe）")
+    out(" 公式サイト調査モード（--probe / ブラウザ方式）")
     out(f" 実行時刻: {datetime.now().isoformat()}")
     out("=" * 60)
 
     watch = WATCHES[0]
-    out(f"\n[1] ホテル一覧ページの取得: {watch['label']}")
-    try:
-        resp = fetch_hotel_list(watch)
-        out(f"  HTTP {resp.status_code} / content-type: {resp.headers.get('content-type', '')}")
-        html = resp.text
-        compact = " ".join(html.split())
-        out(f"  本文先頭600字: {compact[:600]}")
+    out(f"\n[1] 検索結果ページをブラウザで開く: {watch['label']}")
+    out(f"    URL: {build_list_url(watch)}")
 
-        # ホテルコードらしきものを列挙
-        cds = sorted(set(re.findall(r"searchHotelCD=([A-Z0-9]+)", html)))
-        out(f"  HTML内の searchHotelCD 一覧: {cds}")
-        # API らしきURLを列挙
-        apis = sorted(set(re.findall(r"/hotel/api/[A-Za-z0-9_/]+", html)))
-        out(f"  HTML内の /hotel/api/ URL一覧: {apis}")
-        # 満室・空室関連の文言を探す
-        for kw in ["満室", "空室", "予約する", "検索結果"]:
-            out(f"  文言「{kw}」: {'あり' if kw in html else 'なし'}")
-    except Exception as e:
-        out(f"  ✗ 取得失敗: {e}")
+    with sync_playwright() as p:
+        browser, context = new_context(p)
+        try:
+            title, html, api_responses = fetch_page(context, watch, wait_ms=20000)
+            compact = " ".join(html.split())
+            out(f"  ページタイトル: {title}")
+            out(f"  HTML先頭800字: {compact[:800]}")
+            out()
 
-    out(f"\n[2] 空室API（queryHotelPriceStock）へのPOST")
-    payload = {
-        "useDate": watch["useDate"],
-        "stayingDays": str(watch.get("stayingDays", 1)),
-        "adultNum": str(watch.get("adultNum", 2)),
-        "childNum": "0",
-        "roomsNum": "1",
-    }
-    try:
-        resp = session.post(
-            STOCK_API_URL, json=payload,
-            headers={"Referer": LIST_URL, "Origin": BASE,
-                     "Accept": "application/json, text/plain, */*"},
-            timeout=30)
-        out(f"  HTTP {resp.status_code} / content-type: {resp.headers.get('content-type', '')}")
-        compact = " ".join(resp.text.split())
-        out(f"  本文先頭800字: {compact[:800]}")
-    except Exception as e:
-        out(f"  ✗ 取得失敗: {e}")
+            cds = sorted(set(re.findall(r"searchHotelCD=([A-Z0-9]+)", html)))
+            out(f"  HTML内の searchHotelCD 一覧: {cds}")
+            for kw in ["満室", "空室", "予約する", "検索結果", "円"]:
+                out(f"  文言「{kw}」: {'あり' if kw in html else 'なし'}")
+
+            out(f"\n[2] ページ表示中に飛んだ /hotel/api/ の通信: {len(api_responses)}件")
+            for url, status, body in api_responses[:6]:
+                out("-" * 60)
+                out(f"  URL: {url}")
+                out(f"  HTTP {status}")
+                out(f"  body先頭1000字: {' '.join(body.split())[:1000]}")
+
+            # HTML全体も保存しておく（判定ロジック作成用）
+            html_path = os.path.join(SCRIPT_DIR, "probe_page.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html)
+            out(f"\n  → ページ全体を保存: {html_path}")
+        except Exception as e:
+            out(f"  ✗ 取得失敗: {e}")
+            out("  ※ --probe --show を付けて再実行すると、ブラウザ画面が見えるので")
+            out("     何が起きているか（認証画面・混雑ページ等）を確認できます。")
+        finally:
+            browser.close()
 
     out("\n" + "=" * 60)
     out(" 調査おわり。この出力（probe_result.txt）を開発者に貼ってください。")
     out("=" * 60)
 
-    result_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "probe_result.txt")
+    result_path = os.path.join(SCRIPT_DIR, "probe_result.txt")
     try:
         with open(result_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -307,10 +345,10 @@ def run_probe():
 
 # ---------- メイン ----------
 
-def run_pass(state):
+def run_pass(context, state):
     for watch in WATCHES:
         key = watch["label"]
-        available, detail, url = check_watch(watch)
+        available, detail, url = check_watch(context, watch)
 
         if available is None:
             continue  # エラー・判定不能はスキップ（状態を変えない）
@@ -360,11 +398,16 @@ def main():
     )
 
     try:
-        while True:
-            run_pass(state)
-            save_state(state)
-            print(f"[{now()}] --- 次のチェックまで {CHECK_INTERVAL_SEC}秒待機 ---")
-            time.sleep(CHECK_INTERVAL_SEC)
+        with sync_playwright() as p:
+            browser, context = new_context(p)
+            try:
+                while True:
+                    run_pass(context, state)
+                    save_state(state)
+                    print(f"[{now()}] --- 次のチェックまで {CHECK_INTERVAL_SEC}秒待機 ---")
+                    time.sleep(CHECK_INTERVAL_SEC)
+            finally:
+                browser.close()
     finally:
         release_sleep()
 
