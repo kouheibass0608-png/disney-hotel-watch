@@ -225,53 +225,95 @@ def safe_content(page, retries=6, interval_ms=2000):
     raise last_error
 
 
-def fetch_page(context, watch, queue_wait_s=180):
+def _is_queue_page(html):
+    return ('queue-it_log' in html) or ("assets.queue-it.net" in html)
+
+
+def _wait_out_queue(page, queue_wait_s):
+    """混雑待機画面（Queue-it）が消えるまで待つ。経過秒数を返す。"""
+    queue_start = time.time()
+    deadline = queue_start + queue_wait_s
+    while time.time() < deadline:
+        if not _is_queue_page(safe_content(page)):
+            return int(time.time() - queue_start)
+        page.wait_for_timeout(3000)
+    return int(time.time() - queue_start)
+
+
+def fetch_page(context, watch, queue_wait_s=300):
     """
     公式サイトの検索結果ページをブラウザで開く。
-    Queue-it（混雑待機画面）が出た場合は、通過するまで最大 queue_wait_s 秒待つ。
-    戻り値: (title, html, api_responses, queue_seconds)
-      api_responses: [(url, status, body先頭2000字), ...]  /hotel/api/ のXHRのみ
+    ・Queue-it（混雑待機画面）が出たら通過するまで最大 queue_wait_s 秒待つ
+    ・待機通過後に別ページ（トップ等）へ飛ばされていたら、検索URLへ入り直す
+    ・検索結果らしき内容（金額・満室表示・API通信）が出るまで最大90秒待つ
+    戻り値: dict(title, url, html, text, apis, queue_seconds)
+      apis: [(url, status, body先頭2000字), ...]  XHR/fetch通信のうち公式サイト宛のもの
     """
+    target_url = build_list_url(watch)
     page = context.new_page()
     captured = []
 
     def on_response(resp):
-        if "/hotel/api/" in resp.url:
+        try:
+            req = resp.request
+            if req.resource_type not in ("xhr", "fetch"):
+                return
+            if "tokyodisneyresort.jp" not in resp.url:
+                return
             try:
                 body = resp.text()[:2000]
             except Exception:
                 body = "(body取得失敗)"
             captured.append((resp.url, resp.status, body))
+        except Exception:
+            pass
 
     page.on("response", on_response)
     try:
-        page.goto(build_list_url(watch), timeout=90000,
-                  wait_until="domcontentloaded")
+        page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+        queue_seconds = _wait_out_queue(page, queue_wait_s)
 
-        # 混雑待機画面（Queue-it）が消えるまで待つ。
-        # 待機画面→検索ページへの切り替わり（ページ遷移）中はHTMLを読めない
-        # ことがあるので、読み取りは safe_content で行う。
-        queue_start = time.time()
-        queue_seconds = 0
-        deadline = queue_start + queue_wait_s
-        while time.time() < deadline:
-            html = safe_content(page)
-            if 'queue-it_log' not in html and "assets.queue-it.net" not in html:
-                break  # 待機画面を通過した
+        # 待機通過後、検索結果URLに居なければ入り直す（2回目は待機をスキップできる想定）
+        if "/hotel/list" not in page.url:
+            page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+            queue_seconds += _wait_out_queue(page, 60)
+
+        # 検索結果らしき内容が描画されるまで待つ（最大90秒）
+        ready_markers = ("満室", "空室", "円", "検索結果", "プラン")
+        ready_deadline = time.time() + 90
+        while time.time() < ready_deadline:
+            text = ""
+            try:
+                text = page.evaluate("document.body ? document.body.innerText : ''")
+            except Exception:
+                pass
+            if captured or any(m in text for m in ready_markers):
+                break
             page.wait_for_timeout(3000)
-            queue_seconds = int(time.time() - queue_start)
 
-        # 検索結果の読み込み完了とXHR・描画を待ってから記録する
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-        except Exception:
-            pass
-        page.wait_for_timeout(10000)
+        page.wait_for_timeout(5000)  # 最後の描画待ち
         title = page.title()
         html = safe_content(page)
+        try:
+            text = page.evaluate("document.body ? document.body.innerText : ''")
+        except Exception:
+            text = ""
+        final_url = page.url
+        try:
+            page.screenshot(path=os.path.join(SCRIPT_DIR, "probe_screenshot.png"),
+                            full_page=False)
+        except Exception:
+            pass
     finally:
         page.close()
-    return title, html, captured, queue_seconds
+    return {
+        "title": title,
+        "url": final_url,
+        "html": html,
+        "text": text,
+        "apis": captured,
+        "queue_seconds": queue_seconds,
+    }
 
 
 def check_watch(context, watch):
@@ -283,14 +325,16 @@ def check_watch(context, watch):
        それまでは暫定判定（判定不能時はHTMLを保存して知らせる）です。
     """
     try:
-        title, html, api_responses, queue_seconds = fetch_page(context, watch)
-        if queue_seconds:
-            print(f"  （混雑待機画面を {queue_seconds}秒で通過）")
+        result = fetch_page(context, watch)
+        if result["queue_seconds"]:
+            print(f"  （混雑待機画面を {result['queue_seconds']}秒で通過）")
     except Exception as e:
         print(f"  ⚠ ページ取得エラー: {e}")
         return None, None, None
 
-    text = html
+    title = result["title"]
+    html = result["html"]
+    text = result["text"] or html
 
     # --- 暫定の空室判定（probe結果で更新予定） ---
     no_vacancy_markers = ["満室", "空室はありません", "該当するプランがありません",
@@ -336,11 +380,14 @@ def run_probe():
     with sync_playwright() as p:
         browser, context = new_context(p)
         try:
-            title, html, api_responses, queue_seconds = fetch_page(context, watch)
-            compact = " ".join(html.split())
+            result = fetch_page(context, watch)
+            html = result["html"]
+            text = result["text"]
+            queue_seconds = result["queue_seconds"]
             out(f"  混雑待機画面の通過: {queue_seconds}秒" if queue_seconds else "  混雑待機画面: なし（即表示）")
-            out(f"  ページタイトル: {title}")
-            out(f"  HTML先頭800字: {compact[:800]}")
+            out(f"  最終的なURL: {result['url']}")
+            out(f"  ページタイトル: {result['title']}")
+            out(f"  画面の文字（先頭1200字）: {' '.join((text or '').split())[:1200]}")
             out()
 
             cds = sorted(set(re.findall(r"searchHotelCD=([A-Z0-9]+)", html)))
@@ -348,18 +395,19 @@ def run_probe():
             for kw in ["満室", "空室", "予約する", "検索結果", "円"]:
                 out(f"  文言「{kw}」: {'あり' if kw in html else 'なし'}")
 
-            out(f"\n[2] ページ表示中に飛んだ /hotel/api/ の通信: {len(api_responses)}件")
-            for url, status, body in api_responses[:6]:
+            out(f"\n[2] ページ表示中の公式サイト宛XHR/fetch通信: {len(result['apis'])}件")
+            for url, status, body in result["apis"][:10]:
                 out("-" * 60)
                 out(f"  URL: {url}")
                 out(f"  HTTP {status}")
-                out(f"  body先頭1000字: {' '.join(body.split())[:1000]}")
+                out(f"  body先頭800字: {' '.join(body.split())[:800]}")
 
-            # HTML全体も保存しておく（判定ロジック作成用）
+            # HTML全体とスクリーンショットも保存しておく（判定ロジック作成用）
             html_path = os.path.join(SCRIPT_DIR, "probe_page.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html)
             out(f"\n  → ページ全体を保存: {html_path}")
+            out(f"  → 画面の写真を保存: {os.path.join(SCRIPT_DIR, 'probe_screenshot.png')}")
         except Exception as e:
             out(f"  ✗ 取得失敗: {e}")
             out("  ※ 開いたブラウザ画面に何が表示されていたか（待機画面・エラー等）を")
