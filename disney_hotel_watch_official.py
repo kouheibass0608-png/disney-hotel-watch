@@ -20,8 +20,8 @@
         ~/disney-venv/bin/python3 disney_hotel_watch_official.py --probe
      → 画面に出た内容（probe_result.txt にも保存されます）を
         開発者に貼ってください。空室判定ロジックを確定します。
-     ※ うまくいかない時は --probe --show を付けると実際のブラウザ画面が
-        表示されるので、何が起きているか目で確認できます。
+     ※ 実行するとChromeのウィンドウが自動で開きます（公式サイトが
+        裏側モードのブラウザをブロックするため、見えるモードが標準です）。
 
   ステップ2) 通常実行（監視ループ・スリープ防止つき）:
         ~/disney-venv/bin/python3 disney_hotel_watch_official.py
@@ -104,8 +104,10 @@ LIST_URL = BASE + "/hotel/list/"
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_state_official.json")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --show を付けるとブラウザ画面を表示しながら動く（動作確認用）
-HEADLESS = "--show" not in sys.argv
+# 公式サイトは「裏側モード（ヘッドレス）」のブラウザを検知してブロックするため、
+# 画面が見える通常モードで動かすのが標準。実行するとChromeのウィンドウが開きます。
+# （--headless を付けると裏側モードになるが、現状はブロックされて動かない）
+HEADLESS = "--headless" in sys.argv
 
 
 def now():
@@ -211,10 +213,11 @@ def new_context(p):
     return browser, context
 
 
-def fetch_page(context, watch, wait_ms=15000):
+def fetch_page(context, watch, queue_wait_s=180):
     """
     公式サイトの検索結果ページをブラウザで開く。
-    戻り値: (title, html, api_responses)
+    Queue-it（混雑待機画面）が出た場合は、通過するまで最大 queue_wait_s 秒待つ。
+    戻り値: (title, html, api_responses, queue_seconds)
       api_responses: [(url, status, body先頭2000字), ...]  /hotel/api/ のXHRのみ
     """
     page = context.new_page()
@@ -230,14 +233,26 @@ def fetch_page(context, watch, wait_ms=15000):
 
     page.on("response", on_response)
     try:
-        page.goto(build_list_url(watch), timeout=60000,
+        page.goto(build_list_url(watch), timeout=90000,
                   wait_until="domcontentloaded")
-        page.wait_for_timeout(wait_ms)  # XHRや描画を待つ
+
+        # 混雑待機画面（Queue-it）が消えるまで待つ
+        queue_start = time.time()
+        queue_seconds = 0
+        deadline = queue_start + queue_wait_s
+        while time.time() < deadline:
+            html = page.content()
+            if 'queue-it_log' not in html and "assets.queue-it.net" not in html:
+                break  # 待機画面を通過した
+            page.wait_for_timeout(3000)
+            queue_seconds = int(time.time() - queue_start)
+
+        page.wait_for_timeout(10000)  # 検索結果のXHR・描画を待つ
         title = page.title()
         html = page.content()
     finally:
         page.close()
-    return title, html, captured
+    return title, html, captured, queue_seconds
 
 
 def check_watch(context, watch):
@@ -249,7 +264,9 @@ def check_watch(context, watch):
        それまでは暫定判定（判定不能時はHTMLを保存して知らせる）です。
     """
     try:
-        title, html, api_responses = fetch_page(context, watch)
+        title, html, api_responses, queue_seconds = fetch_page(context, watch)
+        if queue_seconds:
+            print(f"  （混雑待機画面を {queue_seconds}秒で通過）")
     except Exception as e:
         print(f"  ⚠ ページ取得エラー: {e}")
         return None, None, None
@@ -300,8 +317,9 @@ def run_probe():
     with sync_playwright() as p:
         browser, context = new_context(p)
         try:
-            title, html, api_responses = fetch_page(context, watch, wait_ms=20000)
+            title, html, api_responses, queue_seconds = fetch_page(context, watch)
             compact = " ".join(html.split())
+            out(f"  混雑待機画面の通過: {queue_seconds}秒" if queue_seconds else "  混雑待機画面: なし（即表示）")
             out(f"  ページタイトル: {title}")
             out(f"  HTML先頭800字: {compact[:800]}")
             out()
@@ -325,8 +343,8 @@ def run_probe():
             out(f"\n  → ページ全体を保存: {html_path}")
         except Exception as e:
             out(f"  ✗ 取得失敗: {e}")
-            out("  ※ --probe --show を付けて再実行すると、ブラウザ画面が見えるので")
-            out("     何が起きているか（認証画面・混雑ページ等）を確認できます。")
+            out("  ※ 開いたブラウザ画面に何が表示されていたか（待機画面・エラー等）を")
+            out("     開発者に伝えてください。")
         finally:
             browser.close()
 
