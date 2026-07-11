@@ -213,6 +213,18 @@ def new_context(p):
     return browser, context
 
 
+def safe_content(page, retries=6, interval_ms=2000):
+    """ページ遷移中でも安全にHTMLを取り出す（遷移中なら少し待って再試行）。"""
+    last_error = None
+    for _ in range(retries):
+        try:
+            return page.content()
+        except Exception as e:
+            last_error = e
+            page.wait_for_timeout(interval_ms)
+    raise last_error
+
+
 def fetch_page(context, watch, queue_wait_s=180):
     """
     公式サイトの検索結果ページをブラウザで開く。
@@ -236,20 +248,27 @@ def fetch_page(context, watch, queue_wait_s=180):
         page.goto(build_list_url(watch), timeout=90000,
                   wait_until="domcontentloaded")
 
-        # 混雑待機画面（Queue-it）が消えるまで待つ
+        # 混雑待機画面（Queue-it）が消えるまで待つ。
+        # 待機画面→検索ページへの切り替わり（ページ遷移）中はHTMLを読めない
+        # ことがあるので、読み取りは safe_content で行う。
         queue_start = time.time()
         queue_seconds = 0
         deadline = queue_start + queue_wait_s
         while time.time() < deadline:
-            html = page.content()
+            html = safe_content(page)
             if 'queue-it_log' not in html and "assets.queue-it.net" not in html:
                 break  # 待機画面を通過した
             page.wait_for_timeout(3000)
             queue_seconds = int(time.time() - queue_start)
 
-        page.wait_for_timeout(10000)  # 検索結果のXHR・描画を待つ
+        # 検索結果の読み込み完了とXHR・描画を待ってから記録する
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        page.wait_for_timeout(10000)
         title = page.title()
-        html = page.content()
+        html = safe_content(page)
     finally:
         page.close()
     return title, html, captured, queue_seconds
