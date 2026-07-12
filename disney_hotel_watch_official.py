@@ -226,7 +226,9 @@ def safe_content(page, retries=6, interval_ms=2000):
 
 
 def _is_queue_page(html):
-    return ('queue-it_log' in html) or ("assets.queue-it.net" in html)
+    # 待機画面の判定。通過後の本物のページにも queue-it 関連の部品が残ることが
+    # あるため、待機画面テンプレート固有のマーカーだけを見る。
+    return ('queue-it_log' in html) or ("順番にご案内" in html and "混雑して" in html)
 
 
 def _wait_out_queue(page, queue_wait_s):
@@ -278,18 +280,50 @@ def fetch_page(context, watch, queue_wait_s=300):
             page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
             queue_seconds += _wait_out_queue(page, 60)
 
-        # 検索結果らしき内容が描画されるまで待つ（最大90秒）
-        ready_markers = ("満室", "空室", "円", "検索結果", "プラン")
-        ready_deadline = time.time() + 90
-        while time.time() < ready_deadline:
-            text = ""
+        def body_text():
             try:
-                text = page.evaluate("document.body ? document.body.innerText : ''")
+                return page.evaluate("document.body ? document.body.innerText : ''")
+            except Exception:
+                return ""
+
+        def wait_for_results(max_s):
+            """部屋一覧らしき内容（金額・満室表示）が描画されるまで待つ。"""
+            ready_markers = ("満室", "円", "空室")
+            deadline = time.time() + max_s
+            while time.time() < deadline:
+                t = body_text()
+                if any(m in t for m in ready_markers):
+                    return True
+                page.wait_for_timeout(3000)
+            return False
+
+        # ホテル検索ページはホテルカードをクリックしないと部屋一覧が出ないので、
+        # 対象ホテルのカード（searchHotelCD入りのリンク）をクリックして進む。
+        clicked = None
+        if not wait_for_results(15):
+            hotel_cd = watch.get("hotelCD", "")
+            try:
+                link = page.query_selector(f'a[href*="searchHotelCD={hotel_cd}"]')
+                if link:
+                    link.click()
+                    clicked = "hotel-card"
             except Exception:
                 pass
-            if captured or any(m in text for m in ready_markers):
-                break
-            page.wait_for_timeout(3000)
+            if not clicked:
+                try:
+                    btn = page.get_by_text("再検索", exact=False)
+                    if btn.count() > 0:
+                        btn.first.click()
+                        clicked = "research-button"
+                except Exception:
+                    pass
+            if clicked:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                queue_seconds += _wait_out_queue(page, 60)  # クリック後に再度待機画面が出る場合
+                wait_for_results(60)
 
         page.wait_for_timeout(5000)  # 最後の描画待ち
         title = page.title()
@@ -313,6 +347,7 @@ def fetch_page(context, watch, queue_wait_s=300):
         "text": text,
         "apis": captured,
         "queue_seconds": queue_seconds,
+        "clicked": clicked,
     }
 
 
@@ -385,10 +420,19 @@ def run_probe():
             text = result["text"]
             queue_seconds = result["queue_seconds"]
             out(f"  混雑待機画面の通過: {queue_seconds}秒" if queue_seconds else "  混雑待機画面: なし（即表示）")
+            out(f"  クリック操作: {result.get('clicked') or 'なし（最初から結果表示）'}")
             out(f"  最終的なURL: {result['url']}")
             out(f"  ページタイトル: {result['title']}")
-            out(f"  画面の文字（先頭1200字）: {' '.join((text or '').split())[:1200]}")
+            out(f"  画面の文字（先頭1500字）: {' '.join((text or '').split())[:1500]}")
             out()
+
+            hrefs = []
+            for h in re.findall(r'href="([^"]*hotel[^"]*)"', html):
+                if h not in hrefs:
+                    hrefs.append(h)
+            out(f"  hotelを含むリンク（先頭20件）:")
+            for h in hrefs[:20]:
+                out(f"    {h}")
 
             cds = sorted(set(re.findall(r"searchHotelCD=([A-Z0-9]+)", html)))
             out(f"  HTML内の searchHotelCD 一覧: {cds}")
