@@ -73,7 +73,7 @@ CHECK_INTERVAL_SEC = 300
 WATCHES = [
     {
         "label": "セレブレーションホテル 9/15〜 1泊 大人2名",
-        "hotelCD": "TCH",
+        "hotelCD": "DCH",
         "useDate": "20260915",
         "stayingDays": 1,
         "adultNum": 2,
@@ -88,22 +88,22 @@ WATCHES = [
     # },
 ]
 
-# 【ホテルコードの目安】（公式サイトURLの searchHotelCD より。--probe で要確認）
+# 【ホテルコード一覧】（公式サイトのホテル選択ドロップダウンで確認済みの正式コード）
 #   TDH : 東京ディズニーランドホテル
 #   DHM : 東京ディズニーシー・ホテルミラコスタ
 #   DAH : ディズニーアンバサダーホテル
-#   TSH : トイ・ストーリーホテル
-#   FSH : ファンタジースプリングスホテル
-#   TCH : 東京ディズニーセレブレーションホテル
+#   TSH : 東京ディズニーリゾート・トイ・ストーリーホテル
+#   FSH : 東京ディズニーシー・ファンタジースプリングスホテル
+#   DCH : 東京ディズニーセレブレーションホテル（※TCHではない）
 
-# ホテル検索ページのカードをクリックするときの目印（画面上のホテル名）
+# ホテル検索ページで操作するときの目印（画面上のホテル名）
 HOTEL_NAMES = {
     "TDH": "ディズニーランドホテル",
     "DHM": "ホテルミラコスタ",
     "DAH": "アンバサダーホテル",
     "TSH": "トイ・ストーリーホテル",
     "FSH": "ファンタジースプリングスホテル",
-    "TCH": "セレブレーションホテル",
+    "DCH": "セレブレーションホテル",
 }
 
 # =================================
@@ -307,63 +307,46 @@ def fetch_page(context, watch, queue_wait_s=300):
                 page.wait_for_timeout(3000)
             return False
 
-        # ホテル検索ページはホテルカードをクリックしないと部屋一覧が出ないので、
-        # 対象ホテルのカードをクリックして進む。
-        clicked = "クリック不要（最初から結果表示）"
+        # 結果が自動表示されない場合は、検索フォームのホテル選択ドロップダウン
+        # （select#hotelCdSelecter）で対象ホテルを選び、「再検索」を押して進む。
+        clicked = "操作不要（最初から結果表示）"
         card_html = ""
         if not wait_for_results(15):
             clicked = None
             hotel_cd = watch.get("hotelCD", "")
-            hotel_name = watch.get("hotelName") or HOTEL_NAMES.get(hotel_cd, "")
 
-            # 診断用: カード部分のHTML構造を記録しておく（クリックに失敗しても原因が分かるように）
-            if hotel_name:
-                try:
-                    el = page.query_selector(f"text={hotel_name}")
-                    if el:
-                        card_html = el.evaluate(
-                            "e => (e.closest('a,li,div') || e).outerHTML")[:1500]
-                except Exception:
-                    pass
-
-            # 1) searchHotelCD入りのリンク
+            # フォームをJavaScriptで直接操作する（カスタムUIでも確実に効くように）
             try:
-                link = page.query_selector(f'a[href*="searchHotelCD={hotel_cd}"]')
-                if link:
-                    link.click()
-                    clicked = "searchHotelCDリンク"
-            except Exception:
-                pass
-            # 2) 画面上のホテル名テキスト（カードのキャプション）
-            if not clicked and hotel_name:
-                try:
-                    loc = page.locator(f"text={hotel_name}")
-                    if loc.count() > 0:
-                        loc.first.click()
-                        clicked = f"ホテル名テキスト（{hotel_name}）"
-                except Exception:
-                    pass
-            # 3) 再検索ボタン（button/input/aの各形式に対応）
-            if not clicked:
-                for sel in ('button:has-text("再検索")',
-                            'input[value*="再検索"]',
-                            'a:has-text("再検索")'):
-                    try:
-                        el = page.query_selector(sel)
-                        if el:
-                            el.click()
-                            clicked = f"再検索ボタン（{sel}）"
-                            break
-                    except Exception:
-                        continue
+                outcome = page.evaluate(
+                    """(cd) => {
+                        const sel = document.getElementById('hotelCdSelecter');
+                        if (!sel) return 'select無し';
+                        sel.value = cd;
+                        sel.dispatchEvent(new Event('change', {bubbles: true}));
+                        const els = Array.from(
+                            document.querySelectorAll('a,button,input,p,span,div'));
+                        const btn = els.find(
+                            e => ((e.value || e.textContent) || '').trim() === '再検索');
+                        if (!btn) return 'ボタン無し';
+                        btn.click();
+                        return 'OK';
+                    }""",
+                    hotel_cd)
+                if outcome == "OK":
+                    clicked = f"ホテル選択（{hotel_cd}）＋再検索"
+                else:
+                    clicked = None
+                    card_html = f"フォーム操作の結果: {outcome}"
+            except Exception as e:
+                card_html = f"フォーム操作でエラー: {e}"
 
             if clicked:
                 try:
                     page.wait_for_load_state("domcontentloaded", timeout=30000)
                 except Exception:
                     pass
-                queue_seconds += _wait_out_queue(page, 60)  # クリック後に再度待機画面が出る場合
-                wait_for_results(60)
+                queue_seconds += _wait_out_queue(page, 60)  # 操作後に再度待機画面が出る場合
+                wait_for_results(90)
 
         page.wait_for_timeout(5000)  # 最後の描画待ち
         title = page.title()
