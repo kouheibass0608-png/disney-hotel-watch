@@ -96,6 +96,16 @@ WATCHES = [
 #   FSH : ファンタジースプリングスホテル
 #   TCH : 東京ディズニーセレブレーションホテル
 
+# ホテル検索ページのカードをクリックするときの目印（画面上のホテル名）
+HOTEL_NAMES = {
+    "TDH": "ディズニーランドホテル",
+    "DHM": "ホテルミラコスタ",
+    "DAH": "アンバサダーホテル",
+    "TSH": "トイ・ストーリーホテル",
+    "FSH": "ファンタジースプリングスホテル",
+    "TCH": "セレブレーションホテル",
+}
+
 # =================================
 
 
@@ -298,25 +308,55 @@ def fetch_page(context, watch, queue_wait_s=300):
             return False
 
         # ホテル検索ページはホテルカードをクリックしないと部屋一覧が出ないので、
-        # 対象ホテルのカード（searchHotelCD入りのリンク）をクリックして進む。
-        clicked = None
+        # 対象ホテルのカードをクリックして進む。
+        clicked = "クリック不要（最初から結果表示）"
+        card_html = ""
         if not wait_for_results(15):
+            clicked = None
             hotel_cd = watch.get("hotelCD", "")
+            hotel_name = watch.get("hotelName") or HOTEL_NAMES.get(hotel_cd, "")
+
+            # 診断用: カード部分のHTML構造を記録しておく（クリックに失敗しても原因が分かるように）
+            if hotel_name:
+                try:
+                    el = page.query_selector(f"text={hotel_name}")
+                    if el:
+                        card_html = el.evaluate(
+                            "e => (e.closest('a,li,div') || e).outerHTML")[:1500]
+                except Exception:
+                    pass
+
+            # 1) searchHotelCD入りのリンク
             try:
                 link = page.query_selector(f'a[href*="searchHotelCD={hotel_cd}"]')
                 if link:
                     link.click()
-                    clicked = "hotel-card"
+                    clicked = "searchHotelCDリンク"
             except Exception:
                 pass
-            if not clicked:
+            # 2) 画面上のホテル名テキスト（カードのキャプション）
+            if not clicked and hotel_name:
                 try:
-                    btn = page.get_by_text("再検索", exact=False)
-                    if btn.count() > 0:
-                        btn.first.click()
-                        clicked = "research-button"
+                    loc = page.locator(f"text={hotel_name}")
+                    if loc.count() > 0:
+                        loc.first.click()
+                        clicked = f"ホテル名テキスト（{hotel_name}）"
                 except Exception:
                     pass
+            # 3) 再検索ボタン（button/input/aの各形式に対応）
+            if not clicked:
+                for sel in ('button:has-text("再検索")',
+                            'input[value*="再検索"]',
+                            'a:has-text("再検索")'):
+                    try:
+                        el = page.query_selector(sel)
+                        if el:
+                            el.click()
+                            clicked = f"再検索ボタン（{sel}）"
+                            break
+                    except Exception:
+                        continue
+
             if clicked:
                 try:
                     page.wait_for_load_state("domcontentloaded", timeout=30000)
@@ -348,6 +388,7 @@ def fetch_page(context, watch, queue_wait_s=300):
         "apis": captured,
         "queue_seconds": queue_seconds,
         "clicked": clicked,
+        "card_html": card_html,
     }
 
 
@@ -420,7 +461,9 @@ def run_probe():
             text = result["text"]
             queue_seconds = result["queue_seconds"]
             out(f"  混雑待機画面の通過: {queue_seconds}秒" if queue_seconds else "  混雑待機画面: なし（即表示）")
-            out(f"  クリック操作: {result.get('clicked') or 'なし（最初から結果表示）'}")
+            out(f"  クリック操作: {result.get('clicked') or '✗ クリック対象が見つからなかった'}")
+            if result.get("card_html"):
+                out(f"  ホテルカードのHTML構造（先頭1500字）: {' '.join(result['card_html'].split())[:1500]}")
             out(f"  最終的なURL: {result['url']}")
             out(f"  ページタイトル: {result['title']}")
             out(f"  画面の文字（先頭1500字）: {' '.join((text or '').split())[:1500]}")
