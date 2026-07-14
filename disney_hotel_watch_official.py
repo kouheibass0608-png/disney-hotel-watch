@@ -15,16 +15,16 @@
         ~/disney-venv/bin/pip install playwright requests
         ~/disney-venv/bin/python3 -m playwright install chromium
 
-使い方（2ステップ）:
-  ステップ1) まず「調査モード」で公式サイトの応答を確認します:
-        ~/disney-venv/bin/python3 disney_hotel_watch_official.py --probe
-     → 画面に出た内容（probe_result.txt にも保存されます）を
-        開発者に貼ってください。空室判定ロジックを確定します。
+使い方:
+  通常実行（監視ループ・スリープ防止つき）:
+        ~/disney-venv/bin/python3 disney_hotel_watch_official.py
      ※ 実行するとChromeのウィンドウが自動で開きます（公式サイトが
         裏側モードのブラウザをブロックするため、見えるモードが標準です）。
+        監視中はウィンドウを閉じないでください。
 
-  ステップ2) 通常実行（監視ループ・スリープ防止つき）:
-        ~/disney-venv/bin/python3 disney_hotel_watch_official.py
+  調査モード（うまく動かない時の診断用）:
+        ~/disney-venv/bin/python3 disney_hotel_watch_official.py --probe
+     → probe_result.txt / probe_screenshot.png に状況が保存されます。
 
 スリープ防止:
   実行中は自動でPCのスリープを防ぎます（Windows / Mac 対応）。
@@ -395,15 +395,24 @@ def check_watch(context, watch):
     html = result["html"]
     text = result["text"] or html
 
-    # --- 暫定の空室判定（probe結果で更新予定） ---
+    # --- 空室判定（実際の部屋一覧ページで確認済みのロジック） ---
+    # 予約できる部屋には「総額：xx,xxx円」と「予約する」ボタンが表示され、
+    # 満室の部屋タイプには「満室」が表示される。
+    # 一部満室でも予約可能な部屋が1つでもあれば「空きあり」と判定する。
+    prices = re.findall(r"総額：([\d,]+)円", text)
+    if prices and "予約する" in text:
+        nums = sorted(int(p.replace(",", "")) for p in prices)
+        detail = (f"予約可能な部屋: {len(nums)}件\n"
+                  f"総額 ¥{nums[0]:,} 〜 ¥{nums[-1]:,}")
+        return True, detail, build_list_url(watch)
+    if "予約する" in text:
+        return True, "予約可能な部屋があります（公式サイトで確認してください）", build_list_url(watch)
+
     no_vacancy_markers = ["満室", "空室はありません", "該当するプランがありません",
-                          "ご希望の条件では見つかりません"]
+                          "ご希望の条件では見つかりません", "ご用意できる客室はありません"]
     for marker in no_vacancy_markers:
         if marker in text:
             return False, None, None
-
-    if re.search(r"/hotel/(detail|room|plan)/", text) or "予約する" in text:
-        return True, "空室の可能性があります（公式サイトで確認してください）", build_list_url(watch)
 
     # 判定できない → HTMLを保存して知らせる
     dump_path = os.path.join(SCRIPT_DIR, "last_unknown_page.html")
