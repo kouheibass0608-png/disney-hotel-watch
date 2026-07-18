@@ -422,9 +422,11 @@ def check_watch(context, watch):
         return None, None, None
 
     # --- 空室判定（実際の部屋一覧ページで確認済みのロジック） ---
-    # 予約できる部屋には「総額：xx,xxx円」の金額表示が出る。
-    # 全て満室の日は「○月○日は全室満室です」と表示され、金額は一切出ない。
-    prices = re.findall(r"総額：([\d,]+)円", text)
+    # 画面の見えるテキストはCSSの都合で満室メッセージを取りこぼすことがあるため、
+    # 判定はHTML全体で行う。
+    # ・「総額：xx,xxx円」は予約可能な部屋が描画されたときにしか現れない → 最優先で空きあり判定
+    # ・金額が1つもなく「全室満室」等の文言があれば空きなし
+    prices = re.findall(r"総額：([\d,]+)円", html)
     if prices:
         nums = sorted(int(p.replace(",", "")) for p in prices)
         detail = (f"予約可能な部屋: {len(nums)}件\n"
@@ -434,10 +436,10 @@ def check_watch(context, watch):
     no_vacancy_markers = ["全室満室", "満室", "空室はありません", "該当するプランがありません",
                           "ご希望の条件では見つかりません", "ご用意できる客室はありません"]
     for marker in no_vacancy_markers:
-        if marker in text:
+        if marker in html:
             return False, None, None
 
-    # 金額なし・満室表示もなし・予約ボタンだけある、という珍しい状態
+    # 金額なし・満室表示もなし・予約ボタンだけ見えている、という珍しい状態
     if "予約する" in text:
         return True, "予約可能な部屋があります（公式サイトで確認してください）", build_list_url(watch)
 
