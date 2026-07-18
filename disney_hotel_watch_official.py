@@ -311,7 +311,7 @@ def fetch_page(context, watch, queue_wait_s=300):
         # （select#hotelCdSelecter）で対象ホテルを選び、「再検索」を押して進む。
         clicked = "操作不要（最初から結果表示）"
         card_html = ""
-        if not wait_for_results(15):
+        if not wait_for_results(45):
             clicked = None
             hotel_cd = watch.get("hotelCD", "")
 
@@ -346,7 +346,9 @@ def fetch_page(context, watch, queue_wait_s=300):
                 except Exception:
                     pass
                 queue_seconds += _wait_out_queue(page, 60)  # 操作後に再度待機画面が出る場合
-                wait_for_results(90)
+            # フォーム操作の成否にかかわらず、描画完了をもう一度待つ
+            # （描画が遅れているだけのケースで早すぎる記録をしないため）
+            wait_for_results(90)
 
         page.wait_for_timeout(5000)  # 最後の描画待ち
         title = page.title()
@@ -396,23 +398,24 @@ def check_watch(context, watch):
     text = result["text"] or html
 
     # --- 空室判定（実際の部屋一覧ページで確認済みのロジック） ---
-    # 予約できる部屋には「総額：xx,xxx円」と「予約する」ボタンが表示され、
-    # 満室の部屋タイプには「満室」が表示される。
-    # 一部満室でも予約可能な部屋が1つでもあれば「空きあり」と判定する。
+    # 予約できる部屋には「総額：xx,xxx円」の金額表示が出る。
+    # 全て満室の日は「○月○日は全室満室です」と表示され、金額は一切出ない。
     prices = re.findall(r"総額：([\d,]+)円", text)
-    if prices and "予約する" in text:
+    if prices:
         nums = sorted(int(p.replace(",", "")) for p in prices)
         detail = (f"予約可能な部屋: {len(nums)}件\n"
                   f"総額 ¥{nums[0]:,} 〜 ¥{nums[-1]:,}")
         return True, detail, build_list_url(watch)
-    if "予約する" in text:
-        return True, "予約可能な部屋があります（公式サイトで確認してください）", build_list_url(watch)
 
-    no_vacancy_markers = ["満室", "空室はありません", "該当するプランがありません",
+    no_vacancy_markers = ["全室満室", "満室", "空室はありません", "該当するプランがありません",
                           "ご希望の条件では見つかりません", "ご用意できる客室はありません"]
     for marker in no_vacancy_markers:
         if marker in text:
             return False, None, None
+
+    # 金額なし・満室表示もなし・予約ボタンだけある、という珍しい状態
+    if "予約する" in text:
+        return True, "予約可能な部屋があります（公式サイトで確認してください）", build_list_url(watch)
 
     # 判定できない → HTMLを保存して知らせる
     dump_path = os.path.join(SCRIPT_DIR, "last_unknown_page.html")
