@@ -63,8 +63,9 @@ except ImportError:
 # ntfyの自分専用トピック名。環境変数 NTFY_TOPIC があればそれを使う。
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC") or "disney-hotel-watch-CHANGE-ME-x7k2"
 
-# チェック間隔（秒）。公式サイトに負荷をかけないよう5分以上を推奨。
-CHECK_INTERVAL_SEC = 300
+# チェック間隔（秒）。短くしすぎると機械的アクセスと判定されて
+# 一時ブロック（Access Denied）される。15分以上を推奨。
+CHECK_INTERVAL_SEC = 900
 
 # 監視したい条件のリスト。
 #   hotelCD  : 公式サイトのホテルコード（下の一覧参照。--probe で実際の値を確認できます）
@@ -72,17 +73,17 @@ CHECK_INTERVAL_SEC = 300
 #   stayingDays / adultNum : 泊数・大人人数
 WATCHES = [
     {
-        "label": "セレブレーションホテル 9/15〜 1泊 大人2名",
-        "hotelCD": "DCH",
-        "useDate": "20260915",
+        "label": "ミラコスタ 9/27〜9/28 1泊 大人2名",
+        "hotelCD": "DHM",
+        "useDate": "20260927",
         "stayingDays": 1,
         "adultNum": 2,
     },
     # ↓ 増やす場合はこの形式でコピーして追加
     # {
-    #     "label": "ミラコスタ 9/19〜 1泊 大人2名",
-    #     "hotelCD": "DHM",
-    #     "useDate": "20260919",
+    #     "label": "セレブレーションホテル 9/15〜 1泊 大人2名",
+    #     "hotelCD": "DCH",
+    #     "useDate": "20260915",
     #     "stayingDays": 1,
     #     "adultNum": 2,
     # },
@@ -213,14 +214,29 @@ def build_list_url(watch):
     return LIST_URL + "?" + urlencode(params)
 
 
+PROFILE_DIR = os.path.join(SCRIPT_DIR, "browser_profile")
+
+
 def new_context(p):
-    browser = p.chromium.launch(headless=HEADLESS)
-    context = browser.new_context(
+    """
+    Cookie等を保存する「永続プロファイル」でブラウザを起動する。
+    毎回まっさらなブラウザで順番待ちに並び直すと機械的アクセスと
+    判定されやすいため、人間が同じブラウザを使い続けるのと同じ状態にする。
+    （browser_profile フォルダが自動で作られます。消さないでください）
+    """
+    context = p.chromium.launch_persistent_context(
+        PROFILE_DIR,
+        headless=HEADLESS,
         locale="ja-JP",
         timezone_id="Asia/Tokyo",
         viewport={"width": 1280, "height": 900},
     )
-    return browser, context
+    return context
+
+
+def _is_denied(html):
+    """Akamaiの一時ブロック（Access Denied）ページかどうか。"""
+    return ("errors.edgesuite.net" in html) or ("<title>Access Denied</title>" in html)
 
 
 def safe_content(page, retries=6, interval_ms=2000):
@@ -307,11 +323,14 @@ def fetch_page(context, watch, queue_wait_s=300):
                 page.wait_for_timeout(3000)
             return False
 
-        # 結果が自動表示されない場合は、検索フォームのホテル選択ドロップダウン
-        # （select#hotelCdSelecter）で対象ホテルを選び、「再検索」を押して進む。
+        # アクセス拒否（一時ブロック）ページなら以降の待ちや操作は不要
         clicked = "操作不要（最初から結果表示）"
         card_html = ""
-        if not wait_for_results(45):
+        if _is_denied(safe_content(page)):
+            pass  # そのまま記録に進む（check_watch側で拒否として扱う）
+        # 結果が自動表示されない場合は、検索フォームのホテル選択ドロップダウン
+        # （select#hotelCdSelecter）で対象ホテルを選び、「再検索」を押して進む。
+        elif not wait_for_results(45):
             clicked = None
             hotel_cd = watch.get("hotelCD", "")
 
@@ -397,6 +416,11 @@ def check_watch(context, watch):
     html = result["html"]
     text = result["text"] or html
 
+    if _is_denied(html):
+        print("  ⛔ 公式サイトにアクセス拒否されました（機械的アクセスと判定された一時ブロック）。"
+              "今回はスキップします。続く場合は1時間ほど止めてから再開してください")
+        return None, None, None
+
     # --- 空室判定（実際の部屋一覧ページで確認済みのロジック） ---
     # 予約できる部屋には「総額：xx,xxx円」の金額表示が出る。
     # 全て満室の日は「○月○日は全室満室です」と表示され、金額は一切出ない。
@@ -449,7 +473,7 @@ def run_probe():
     out(f"    URL: {build_list_url(watch)}")
 
     with sync_playwright() as p:
-        browser, context = new_context(p)
+        context = new_context(p)
         try:
             result = fetch_page(context, watch)
             html = result["html"]
@@ -495,7 +519,7 @@ def run_probe():
             out("  ※ 開いたブラウザ画面に何が表示されていたか（待機画面・エラー等）を")
             out("     開発者に伝えてください。")
         finally:
-            browser.close()
+            context.close()
 
     out("\n" + "=" * 60)
     out(" 調査おわり。この出力（probe_result.txt）を開発者に貼ってください。")
@@ -566,7 +590,7 @@ def main():
 
     try:
         with sync_playwright() as p:
-            browser, context = new_context(p)
+            context = new_context(p)
             try:
                 while True:
                     run_pass(context, state)
@@ -574,7 +598,7 @@ def main():
                     print(f"[{now()}] --- 次のチェックまで {CHECK_INTERVAL_SEC}秒待機 ---")
                     time.sleep(CHECK_INTERVAL_SEC)
             finally:
-                browser.close()
+                context.close()
     finally:
         release_sleep()
 
