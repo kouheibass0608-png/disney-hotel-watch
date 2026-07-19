@@ -67,6 +67,12 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC") or "disney-hotel-watch-CHANGE-ME-x7k2"
 # 一時ブロック（Access Denied）される。15分以上を推奨。
 CHECK_INTERVAL_SEC = 900
 
+# アクセス拒否（一時ブロック）されたときの休止時間（秒）。1時間。
+DENIED_BACKOFF_SEC = 3600
+
+# ブロック検知フラグ（内部用）
+_denied_in_this_pass = False
+
 # 監視したい条件のリスト。
 #   hotelCD  : 公式サイトのホテルコード（下の一覧参照。--probe で実際の値を確認できます）
 #   useDate  : チェックイン日 YYYYMMDD
@@ -417,8 +423,10 @@ def check_watch(context, watch):
     text = result["text"] or html
 
     if _is_denied(html):
+        global _denied_in_this_pass
+        _denied_in_this_pass = True
         print("  ⛔ 公式サイトにアクセス拒否されました（機械的アクセスと判定された一時ブロック）。"
-              "今回はスキップします。続く場合は1時間ほど止めてから再開してください")
+              "ブロック解除を待つため、自動で1時間休止します")
         return None, None, None
 
     # --- 空室判定（実際の部屋一覧ページで確認済みのロジック） ---
@@ -594,11 +602,18 @@ def main():
         with sync_playwright() as p:
             context = new_context(p)
             try:
+                global _denied_in_this_pass
                 while True:
+                    _denied_in_this_pass = False
                     run_pass(context, state)
                     save_state(state)
-                    print(f"[{now()}] --- 次のチェックまで {CHECK_INTERVAL_SEC}秒待機 ---")
-                    time.sleep(CHECK_INTERVAL_SEC)
+                    if _denied_in_this_pass:
+                        wait = max(CHECK_INTERVAL_SEC, DENIED_BACKOFF_SEC)
+                        print(f"[{now()}] --- ⛔ ブロック中のため {wait // 60}分休止します ---")
+                        time.sleep(wait)
+                    else:
+                        print(f"[{now()}] --- 次のチェックまで {CHECK_INTERVAL_SEC}秒待機 ---")
+                        time.sleep(CHECK_INTERVAL_SEC)
             finally:
                 context.close()
     finally:
