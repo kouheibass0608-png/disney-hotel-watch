@@ -35,6 +35,7 @@ import ctypes
 import json
 import os
 import platform
+import random
 import re
 import subprocess
 import sys
@@ -64,8 +65,17 @@ except ImportError:
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC") or "disney-hotel-watch-CHANGE-ME-x7k2"
 
 # チェック間隔（秒）。短くしすぎると機械的アクセスと判定されて
-# 一時ブロック（Access Denied）される。15分以上を推奨。
-CHECK_INTERVAL_SEC = 900
+# 一時ブロック（Access Denied）される。20分以上を推奨。
+CHECK_INTERVAL_SEC = 1200
+
+# 上の間隔に加える「ゆらぎ」の最大秒数。毎回 ±この範囲でランダムにずらし、
+# 時計どおりの規則的アクセス（＝機械的と判定されやすい）を避ける。
+CHECK_JITTER_SEC = 300
+
+# 監視を動かす時間帯（24時間表記）。この範囲外の時刻はチェックを休む。
+# 深夜のアクセスを避け、総アクセス量を減らすため。8〜24時（深夜2〜7時等は休止）。
+ACTIVE_HOUR_START = 8
+ACTIVE_HOUR_END = 24  # 24 = その日の終わりまで
 
 # アクセス拒否（一時ブロック）されたときの休止時間（秒）。1時間。
 DENIED_BACKOFF_SEC = 3600
@@ -129,6 +139,30 @@ HEADLESS = "--headless" in sys.argv
 
 def now():
     return datetime.now().strftime("%H:%M:%S")
+
+
+def in_active_hours():
+    """今が監視を動かす時間帯かどうか。"""
+    h = datetime.now().hour
+    return ACTIVE_HOUR_START <= h < ACTIVE_HOUR_END
+
+
+def seconds_until_active():
+    """次に監視時間帯が始まるまでの秒数（休止時間の計算用）。"""
+    n = datetime.now()
+    h = n.hour
+    if h < ACTIVE_HOUR_START:
+        hours_to_wait = ACTIVE_HOUR_START - h
+    else:  # 終了時刻を過ぎている → 翌日の開始まで
+        hours_to_wait = (24 - h) + ACTIVE_HOUR_START
+    # 分・秒ぶんを差し引いて概算
+    return hours_to_wait * 3600 - n.minute * 60 - n.second
+
+
+def next_wait_seconds():
+    """次のチェックまでの待ち時間（ゆらぎ込み）を返す。"""
+    jitter = random.randint(-CHECK_JITTER_SEC, CHECK_JITTER_SEC)
+    return max(60, CHECK_INTERVAL_SEC + jitter)
 
 
 def load_state():
@@ -604,16 +638,24 @@ def main():
             try:
                 global _denied_in_this_pass
                 while True:
+                    # 深夜など監視時間帯外なら、時間帯が始まるまで休む
+                    if not in_active_hours():
+                        wait = max(600, seconds_until_active())
+                        print(f"[{now()}] --- 😴 監視時間帯外（{ACTIVE_HOUR_START}〜{ACTIVE_HOUR_END}時）"
+                              f"のため約{wait // 60}分休みます ---")
+                        time.sleep(wait)
+                        continue
+
                     _denied_in_this_pass = False
                     run_pass(context, state)
                     save_state(state)
                     if _denied_in_this_pass:
                         wait = max(CHECK_INTERVAL_SEC, DENIED_BACKOFF_SEC)
                         print(f"[{now()}] --- ⛔ ブロック中のため {wait // 60}分休止します ---")
-                        time.sleep(wait)
                     else:
-                        print(f"[{now()}] --- 次のチェックまで {CHECK_INTERVAL_SEC}秒待機 ---")
-                        time.sleep(CHECK_INTERVAL_SEC)
+                        wait = next_wait_seconds()
+                        print(f"[{now()}] --- 次のチェックまで 約{wait // 60}分待機 ---")
+                    time.sleep(wait)
             finally:
                 context.close()
     finally:
