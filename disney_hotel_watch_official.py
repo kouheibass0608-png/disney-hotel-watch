@@ -308,43 +308,110 @@ def _wait_out_queue(page, queue_wait_s):
     return int(time.time() - queue_start)
 
 
+_page = None        # 監視中ずっと開いたままにするページ
+_captured = []      # 直近チェックで観測した通信
+
+
+def _page_alive(page):
+    try:
+        return page is not None and not page.is_closed()
+    except Exception:
+        return False
+
+
+def _on_response(resp):
+    try:
+        if resp.request.resource_type not in ("xhr", "fetch"):
+            return
+        if "tokyodisneyresort.jp" not in resp.url:
+            return
+        try:
+            body = resp.text()[:2000]
+        except Exception:
+            body = "(body取得失敗)"
+        _captured.append((resp.url, resp.status, body))
+    except Exception:
+        pass
+
+
+def _same_search(url, watch):
+    """今ページに表示中の検索条件が、この監視対象と同じかどうか。"""
+    if not url or "/hotel/list" not in url:
+        return False
+    return (f"useDate={watch['useDate']}" in url
+            and f"searchHotelCD={watch.get('hotelCD', '')}" in url)
+
+
+def _click_research(page):
+    """ページ上の「再検索」ボタンを押す。成功したらTrue。"""
+    try:
+        return page.evaluate(
+            """() => {
+                const els = Array.from(
+                    document.querySelectorAll('a,button,input,p,span,div'));
+                const btn = els.find(
+                    e => ((e.value || e.textContent) || '').trim() === '再検索');
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }""")
+    except Exception:
+        return False
+
+
 def fetch_page(context, watch, queue_wait_s=300):
     """
-    公式サイトの検索結果ページをブラウザで開く。
-    ・Queue-it（混雑待機画面）が出たら通過するまで最大 queue_wait_s 秒待つ
-    ・待機通過後に別ページ（トップ等）へ飛ばされていたら、検索URLへ入り直す
-    ・検索結果らしき内容（金額・満室表示・API通信）が出るまで最大90秒待つ
-    戻り値: dict(title, url, html, text, apis, queue_seconds)
-      apis: [(url, status, body先頭2000字), ...]  XHR/fetch通信のうち公式サイト宛のもの
+    公式サイトの部屋一覧を取得する。
+
+    ページは開いたまま使い回し、2回目以降は「再検索」ボタンを押すだけにする。
+    毎回ページを開き直すと順番待ち（Queue-it）に並び直しになり、サイトへの
+    負荷も大きく機械的アクセスとして目立つため。人が画面を開いたまま
+    ときどき再検索するのと同じ動きになる。
+
+    戻り値: dict(title, url, html, text, apis, queue_seconds, clicked, card_html)
     """
+    global _page
+    del _captured[:]
     target_url = build_list_url(watch)
-    page = context.new_page()
-    captured = []
+    queue_seconds = 0
 
-    def on_response(resp):
-        try:
-            req = resp.request
-            if req.resource_type not in ("xhr", "fetch"):
-                return
-            if "tokyodisneyresort.jp" not in resp.url:
-                return
+    reuse = _page_alive(_page) and _same_search(_page.url, watch)
+    if reuse:
+        page = _page
+    else:
+        if _page_alive(_page):
             try:
-                body = resp.text()[:2000]
+                _page.close()
             except Exception:
-                body = "(body取得失敗)"
-            captured.append((resp.url, resp.status, body))
-        except Exception:
-            pass
+                pass
+        page = context.new_page()
+        page.on("response", _on_response)
+        _page = page
 
-    page.on("response", on_response)
     try:
-        page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
-        queue_seconds = _wait_out_queue(page, queue_wait_s)
-
-        # 待機通過後、検索結果URLに居なければ入り直す（2回目は待機をスキップできる想定）
-        if "/hotel/list" not in page.url:
+        if reuse:
+            # ページを開いたまま「再検索」を押す（順番待ちなし・読み込みなし）
+            opened = "再検索（ページを開いたまま）"
+            if _click_research(page):
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(8000)  # 結果が入れ替わるのを待つ
+            else:
+                # ボタンが見つからない等の場合だけ、開き直しにフォールバック
+                page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+                queue_seconds = _wait_out_queue(page, queue_wait_s)
+                opened = "ページを開き直し（再検索ボタンが見つからず）"
+        else:
+            opened = "初回ページ表示"
             page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
-            queue_seconds += _wait_out_queue(page, 60)
+            queue_seconds = _wait_out_queue(page, queue_wait_s)
+
+            # 待機通過後、検索結果URLに居なければ入り直す
+            if "/hotel/list" not in page.url:
+                page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+                queue_seconds += _wait_out_queue(page, 60)
 
         def body_text():
             try:
@@ -422,17 +489,26 @@ def fetch_page(context, watch, queue_wait_s=300):
                             full_page=False)
         except Exception:
             pass
-    finally:
-        page.close()
+    except Exception:
+        # 失敗したページは使い回さない（次回はきれいに開き直す）
+        if _page_alive(page):
+            try:
+                page.close()
+            except Exception:
+                pass
+        _page = None
+        raise
+    # ページは閉じずに開いたままにする（次回は再検索するだけで済む）
     return {
         "title": title,
         "url": final_url,
         "html": html,
         "text": text,
-        "apis": captured,
+        "apis": list(_captured),
         "queue_seconds": queue_seconds,
         "clicked": clicked,
         "card_html": card_html,
+        "opened": opened,
     }
 
 
@@ -446,6 +522,7 @@ def check_watch(context, watch):
     """
     try:
         result = fetch_page(context, watch)
+        print(f"  （{result.get('opened', '')}）")
         if result["queue_seconds"]:
             print(f"  （混雑待機画面を {result['queue_seconds']}秒で通過）")
     except Exception as e:
